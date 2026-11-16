@@ -5,6 +5,9 @@
     <property name="VertLine" iskey="true" value="VertLine">
       <property name="BackColor">White</property>
     </property>
+    <property name="FixedLine" iskey="true" value="FixedLine">
+      <property name="ForeColor">Black</property>
+    </property>
     <property name="HorzLine" iskey="true" value="HorzLine">
       <property name="ForeColor">White</property>
       <property name="BackColor">White</property>
@@ -17,9 +20,6 @@
       <property name="TextOptions" isnull="true" iskey="true">
         <property name="HAlignment">Center</property>
       </property>
-    </property>
-    <property name="FixedLine" iskey="true" value="FixedLine">
-      <property name="ForeColor">Black</property>
     </property>
   </property>
   <property name="OptionsBehavior" isnull="true" iskey="true">
