@@ -1,0 +1,25 @@
+# Large archives (>100MB exceeds GitHub limits)
+*.rar
+*.zip
+*.7z
+*.tar
+*.gz
+v6.14.rar
+
+# Crash dumps and diagnostic logs
+*.dmp
+*.log
+gate_trace.log
+stdout.log
+stderr.log
+gate_stdout.txt
+gate_stderr.txt
+Gate.exe.WebView2/
+
+# Live update spool files
+live_updates/*.json
+!live_updates/.gitkeep
+
+# Hot reload temporary triggers
+config/**/.reload_*
+config/**/.success_*
