@@ -446,18 +446,38 @@ class LordsBotRequestHandler(BaseHTTPRequestHandler):
         IconHook expects:
           doc.RootElement.GetProperty("gameversion").GetProperty("lordsbot").GetString()
         """
-        print(f"[*] [GAMEVERSION] Serving gameversion.lordsbot='{self.server.game_version}'")
+        gv = read_game_version_from_file()
+        print(f"[*] [GAMEVERSION] Serving game='{gv}', lordsbot='{self.server.game_version}'")
         self._send_json(200, {
             "gameversion": {
                 "lordsbot": self.server.game_version,
-                "game": "2.208.320",
-                "game_version": "2.208.320",
+                "game": gv,
+                "game_version": gv,
                 "version": self.server.game_version
             },
-            "game_version": "2.208.320",
-            "game": "2.208.320",
+            "game_version": gv,
+            "game": gv,
             "success": True
         })
+
+
+def read_game_version_from_file():
+    candidates = [
+        "game_version.txt",
+        "../game_version.txt",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_version.txt"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "game_version.txt")
+    ]
+    for p in candidates:
+        try:
+            if os.path.isfile(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    v = f.read().strip()
+                    if v and "." in v:
+                        return v
+        except Exception:
+            pass
+    return "2.208.320"
 
 
 class ThreadedLordsServer(ThreadingMixIn, HTTPServer):
