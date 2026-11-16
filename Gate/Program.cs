@@ -24,7 +24,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using DevExpress.LookAndFeel;
+using DevExpress.XtraBars;
 using DevExpress.XtraGrid;
+using DevExpress.XtraGrid.Views.Grid;
 using Google.Protobuf;
 using Google.Protobuf.Collections;
 using Grpc.Core;
@@ -1313,6 +1315,7 @@ public static class Program
 			AccountWindow.Instance = accountWindow;
 			try { var _ = accountWindow.Handle; } catch (Exception exHandle) { Trace("[GATE] Note forcing handle creation: " + exHandle.Message); }
 			Trace("[GATE] AccountWindow instantiated successfully.");
+			SetupAccountContextMenuHandlers(accountWindow);
 			try
 			{
 				Schema.RunningAccountsField.SetValue(null, BotResolver.CreateSyncCache(Schema, slots));
@@ -4736,6 +4739,18 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 			Trace("[GATE] [AutoVersion] Detected outdated game version notification in modal (Sharer)! Triggering live auto-update...");
 			Task.Run(() => CheckAndUpdateLiveVersion(true));
 		}
+		if ((res != null && (res.Contains("delete", StringComparison.OrdinalIgnoreCase) || res.Contains("remove", StringComparison.OrdinalIgnoreCase))) ||
+		    (cfg != null && (cfg.Contains("delete", StringComparison.OrdinalIgnoreCase) || cfg.Contains("remove", StringComparison.OrdinalIgnoreCase))))
+		{
+			Trace($"[GATE] Intercepted AssignLiteralWatcherSharer modal for deletion: res='{res}', caption='{cfg}', icon={filter}");
+			DialogResult dr = MessageBox.Show(res, cfg, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+			Trace($"[GATE] Delete confirmation result: {dr}");
+			if (dr == DialogResult.Yes)
+			{
+				CleanupDeletedAccountFolders();
+			}
+			return dr;
+		}
 		if (res != null && (res.Contains("re-assign proxies", StringComparison.OrdinalIgnoreCase) ||
 		                    res.Contains("Do you want to continue", StringComparison.OrdinalIgnoreCase) ||
 		                    res.Contains("reset all", StringComparison.OrdinalIgnoreCase) ||
@@ -4752,6 +4767,18 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 
 	public static DialogResult BypassStartSharer(string setup, string reg, MessageBoxIcon consumer)
 	{
+		if ((setup != null && (setup.Contains("delete", StringComparison.OrdinalIgnoreCase) || setup.Contains("remove", StringComparison.OrdinalIgnoreCase))) ||
+		    (reg != null && (reg.Contains("delete", StringComparison.OrdinalIgnoreCase) || reg.Contains("remove", StringComparison.OrdinalIgnoreCase))))
+		{
+			Trace($"[GATE] Intercepted StartSharer modal for deletion: setup='{setup}', caption='{reg}', icon={consumer}");
+			DialogResult dr = MessageBox.Show(setup, reg, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+			Trace($"[GATE] Delete confirmation result: {dr}");
+			if (dr == DialogResult.Yes)
+			{
+				CleanupDeletedAccountFolders();
+			}
+			return dr;
+		}
 		if (setup != null && (setup.Contains("re-assign proxies", StringComparison.OrdinalIgnoreCase) ||
 		                      setup.Contains("Do you want to continue", StringComparison.OrdinalIgnoreCase) ||
 		                      setup.Contains("reset all", StringComparison.OrdinalIgnoreCase) ||
@@ -4764,6 +4791,290 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 
 		Trace($"[GATE] Intercepted StartSharer modal: setup='{setup}', caption='{reg}', icon={consumer} -> returning OK");
 		return DialogResult.OK;
+	}
+
+	private static void CleanupDeletedAccountFolders()
+	{
+		try
+		{
+			AccountWindow? aw = AccountWindow.Instance;
+			if (aw == null) return;
+			List<string> selectedIggs = new List<string>();
+			GridView? view = aw.accountView;
+			if (view != null)
+			{
+				for (int i = 0; i < view.RowCount; i++)
+				{
+					int rh = view.GetRowHandle(i);
+					if (!view.IsGroupRow(rh))
+					{
+						object? item = view.GetRow(rh);
+						if (item != null)
+						{
+							PropertyInfo? isSelProp = item.GetType().GetProperty("IsSelected");
+							if ((bool)(isSelProp?.GetValue(item) ?? false))
+							{
+								string? igg = item.GetType().GetProperty("IGG")?.GetValue(item)?.ToString();
+								if (string.IsNullOrEmpty(igg) || igg == "0")
+								{
+									igg = item.GetType().GetField("IGG_S", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(item)?.ToString();
+								}
+								if (!string.IsNullOrEmpty(igg))
+								{
+									selectedIggs.Add(igg);
+								}
+							}
+						}
+					}
+				}
+			}
+
+			if (selectedIggs.Count > 0)
+			{
+				Task.Run(async () =>
+				{
+					await Task.Delay(800);
+					string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+					foreach (string igg in selectedIggs)
+					{
+						try
+						{
+							string dir = Path.Combine(baseDir, "config", igg);
+							if (Directory.Exists(dir))
+							{
+								Directory.Delete(dir, true);
+								Trace($"[GATE] [CleanDelete] Purged account folder from disk: {dir}");
+							}
+							string vital = Path.Combine(baseDir, "vital", igg);
+							if (Directory.Exists(vital))
+							{
+								Directory.Delete(vital, true);
+								Trace($"[GATE] [CleanDelete] Purged vital folder from disk: {vital}");
+							}
+						}
+						catch (Exception ex)
+						{
+							Trace($"[GATE] [CleanDelete] Note purging account {igg}: {ex.Message}");
+						}
+					}
+				});
+			}
+		}
+		catch (Exception ex)
+		{
+			Trace($"[GATE] Note in CleanupDeletedAccountFolders: {ex.Message}");
+		}
+	}
+
+	private static void SetupAccountContextMenuHandlers(AccountWindow accountWindow)
+	{
+		try
+		{
+			GridView? view = accountWindow?.accountView;
+			if (view == null)
+			{
+				Trace("[GATE] [ContextMenu] accountView is null during setup!");
+				return;
+			}
+
+			view.PopupMenuShowing += (object sender, PopupMenuShowingEventArgs e) =>
+			{
+				try
+				{
+					if (e.HitInfo != null && e.HitInfo.InRow && e.HitInfo.RowHandle >= 0 && !view.IsGroupRow(e.HitInfo.RowHandle))
+					{
+						view.FocusedRowHandle = e.HitInfo.RowHandle;
+						object? rowObj = view.GetRow(e.HitInfo.RowHandle);
+						if (rowObj != null)
+						{
+							PropertyInfo? isSelProp = rowObj.GetType().GetProperty("IsSelected");
+							bool isCurrentlySelected = (bool)(isSelProp?.GetValue(rowObj) ?? false);
+							if (!isCurrentlySelected)
+							{
+								// User right-clicked an unselected row:
+								// Set this row as the target selected account for right-click context operations
+								for (int i = 0; i < view.RowCount; i++)
+								{
+									int rh = view.GetRowHandle(i);
+									if (!view.IsGroupRow(rh))
+									{
+										object? item = view.GetRow(rh);
+										if (item != null && item != rowObj)
+										{
+											isSelProp?.SetValue(item, false);
+										}
+									}
+								}
+								isSelProp?.SetValue(rowObj, true);
+								view.RefreshRow(e.HitInfo.RowHandle);
+								string? igg = rowObj.GetType().GetProperty("IGG")?.GetValue(rowObj)?.ToString();
+								Trace($"[GATE] [ContextMenu] Right-click auto-selected row {e.HitInfo.RowHandle} (IGG={igg})");
+							}
+						}
+					}
+				}
+				catch (Exception ex)
+				{
+					Trace($"[GATE] [ContextMenu] Error in PopupMenuShowing: {ex.Message}");
+				}
+			};
+
+			if (accountWindow.startMenuItem != null)
+			{
+				bool nativeStartWired = HasItemClickSubscribers(accountWindow.startMenuItem);
+				Trace($"[GATE] [ContextMenu] startMenuItem natively wired={nativeStartWired}");
+				accountWindow.startMenuItem.ItemClick += (s, e) =>
+				{
+					Trace("[GATE] [ContextMenu] startMenuItem clicked");
+					EnsureTargetAccountSelected(accountWindow);
+					if (!nativeStartWired)
+					{
+						MethodInfo? m = accountWindow.GetType().GetMethod("startAccBtn_ButtonClick", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+						object? btn = accountWindow.GetType().GetField("startAccBtn", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(accountWindow);
+						m?.Invoke(accountWindow, new object?[] { btn ?? accountWindow, null });
+						Trace("[GATE] [ContextMenu] Explicitly invoked startAccBtn_ButtonClick from startMenuItem.");
+					}
+				};
+			}
+
+			if (accountWindow.stopMenuItem != null)
+			{
+				bool nativeStopWired = HasItemClickSubscribers(accountWindow.stopMenuItem);
+				Trace($"[GATE] [ContextMenu] stopMenuItem natively wired={nativeStopWired}");
+				accountWindow.stopMenuItem.ItemClick += (s, e) =>
+				{
+					Trace("[GATE] [ContextMenu] stopMenuItem clicked");
+					EnsureTargetAccountSelected(accountWindow);
+					if (!nativeStopWired)
+					{
+						MethodInfo? m = accountWindow.GetType().GetMethod("stopAccBtn_ButtonClick", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+						object? btn = accountWindow.GetType().GetField("stopAccBtn", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(accountWindow);
+						m?.Invoke(accountWindow, new object?[] { btn ?? accountWindow, null });
+						Trace("[GATE] [ContextMenu] Explicitly invoked stopAccBtn_ButtonClick from stopMenuItem.");
+					}
+				};
+			}
+
+			if (accountWindow.deleteMenuItem != null)
+			{
+				bool nativeDeleteWired = HasItemClickSubscribers(accountWindow.deleteMenuItem);
+				Trace($"[GATE] [ContextMenu] deleteMenuItem natively wired={nativeDeleteWired}");
+				accountWindow.deleteMenuItem.ItemClick += (s, e) =>
+				{
+					Trace("[GATE] [ContextMenu] deleteMenuItem clicked");
+					EnsureTargetAccountSelected(accountWindow);
+					if (!nativeDeleteWired)
+					{
+						MethodInfo? m = accountWindow.GetType().GetMethod("deleteAccountsBtn_Click", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+						object? btn = accountWindow.GetType().GetField("deleteAccountsBtn", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(accountWindow);
+						m?.Invoke(accountWindow, new object?[] { btn ?? accountWindow, null });
+						Trace("[GATE] [ContextMenu] Explicitly invoked deleteAccountsBtn_Click from deleteMenuItem.");
+					}
+				};
+			}
+
+			if (accountWindow.selectMenuItem != null)
+			{
+				accountWindow.selectMenuItem.ItemClick += (s, e) =>
+				{
+					try
+					{
+						int rh = view.FocusedRowHandle;
+						if (rh >= 0 && !view.IsGroupRow(rh))
+						{
+							object? row = view.GetRow(rh);
+							if (row != null)
+							{
+								PropertyInfo? prop = row.GetType().GetProperty("IsSelected");
+								if (prop != null)
+								{
+									bool cur = (bool)(prop.GetValue(row) ?? false);
+									prop.SetValue(row, !cur);
+									view.RefreshRow(rh);
+									Trace($"[GATE] [ContextMenu] Toggled selection for row {rh}: {!cur}");
+								}
+							}
+						}
+					}
+					catch (Exception ex)
+					{
+						Trace($"[GATE] [ContextMenu] Error in selectMenuItem: {ex.Message}");
+					}
+				};
+			}
+
+			Trace("[GATE] AccountWindow context menu & row selection handlers successfully installed.");
+		}
+		catch (Exception ex)
+		{
+			Trace($"[GATE] Note configuring context menu handlers: {ex.Message}");
+		}
+	}
+
+	private static bool HasItemClickSubscribers(BarButtonItem item)
+	{
+		try
+		{
+			PropertyInfo? eventsProp = typeof(System.ComponentModel.Component).GetProperty("Events", BindingFlags.Instance | BindingFlags.NonPublic);
+			System.ComponentModel.EventHandlerList? list = eventsProp?.GetValue(item) as System.ComponentModel.EventHandlerList;
+			if (list == null) return false;
+
+			FieldInfo[] fields = typeof(BarItem).GetFields(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+			foreach (var f in fields)
+			{
+				if (f.Name.IndexOf("click", StringComparison.OrdinalIgnoreCase) >= 0)
+				{
+					object? key = f.GetValue(null);
+					if (key != null && list[key] != null)
+					{
+						return true;
+					}
+				}
+			}
+		}
+		catch { }
+		return false;
+	}
+
+	private static void EnsureTargetAccountSelected(AccountWindow aw)
+	{
+		try
+		{
+			GridView? view = aw?.accountView;
+			if (view == null) return;
+			int focusedHandle = view.FocusedRowHandle;
+			if (focusedHandle < 0 || view.IsGroupRow(focusedHandle)) return;
+			object? focusedRow = view.GetRow(focusedHandle);
+			if (focusedRow == null) return;
+			PropertyInfo? isSelProp = focusedRow.GetType().GetProperty("IsSelected");
+			if (isSelProp == null) return;
+
+			bool anySelected = false;
+			for (int i = 0; i < view.RowCount; i++)
+			{
+				int rh = view.GetRowHandle(i);
+				if (!view.IsGroupRow(rh))
+				{
+					object? item = view.GetRow(rh);
+					if (item != null && (bool)(isSelProp.GetValue(item) ?? false))
+					{
+						anySelected = true;
+						break;
+					}
+				}
+			}
+
+			if (!anySelected)
+			{
+				isSelProp.SetValue(focusedRow, true);
+				view.RefreshRow(focusedHandle);
+				Trace($"[GATE] [ContextMenu] Auto-checked focused row {focusedHandle} because no accounts were selected.");
+			}
+		}
+		catch (Exception ex)
+		{
+			Trace($"[GATE] Note in EnsureTargetAccountSelected: {ex.Message}");
+		}
 	}
 
 	public static string BypassFindExtractor()
