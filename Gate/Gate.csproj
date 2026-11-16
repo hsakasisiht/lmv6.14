@@ -14,7 +14,7 @@
 
   <ItemGroup>
     <Reference Include="LordsMobileBot">
-      <HintPath>..\LordsMobileBot.dll</HintPath>
+      <HintPath>..\v6.14\LordsMobileBot.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="DevExpress.Data.v26.1">

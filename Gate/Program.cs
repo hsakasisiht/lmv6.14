@@ -964,6 +964,39 @@ public static class Program
 
 	private static void SetupAssemblyResolver()
 	{
+		System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += (context, assemblyName) =>
+		{
+			string text = assemblyName.Name + ".dll";
+			string[] array = new string[4]
+			{
+				Path.Combine(AppDomain.CurrentDomain.BaseDirectory, text),
+				Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "lib", text),
+				Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", text),
+				Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "lib", text)
+			};
+			foreach (string text2 in array)
+			{
+				if (File.Exists(text2))
+				{
+					try
+					{
+						var result = context.LoadFromAssemblyPath(Path.GetFullPath(text2));
+						Trace("[ALC RESOLVE SUCCESS] Loaded " + text + " from " + text2);
+						if (text.Contains("DevExpress.Data", StringComparison.OrdinalIgnoreCase))
+						{
+							DisableDevExpressThreadingDetection(result);
+						}
+						return result;
+					}
+					catch (Exception ex)
+					{
+						Trace("[ALC RESOLVE ERROR] Failed loading " + text2 + ": " + ex.Message);
+					}
+				}
+			}
+			return null;
+		};
+
 		AppDomain.CurrentDomain.AssemblyResolve += (object? sender, ResolveEventArgs resolveArgs) =>
 		{
 			string text = new AssemblyName(resolveArgs.Name).Name + ".dll";
@@ -3875,41 +3908,148 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 		string key = config ?? "";
 		return s_hookedHttpClients.GetOrAdd(key, k =>
 		{
-			SocketsHttpHandler handler;
+			Trace($"[GATE] Creating resilient HttpClient for proxy config='{k}' (rejectcont={rejectcont}, canres={canres})");
 			var info = DynamicCreationWebProxy.ParseProxy(k);
-			if (info != null && !string.IsNullOrEmpty(info.Host) && info.Port > 0)
+			string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+			bool switchLocalOnFail = IsSwitchLocalOnFailEnabled(baseDir);
+
+			var handler = new ResilientProxyHttpHandler(info, switchLocalOnFail);
+			return new HttpClient(handler)
 			{
-				handler = new SocketsHttpHandler
+				Timeout = TimeSpan.FromSeconds(20)
+			};
+		});
+	}
+
+	public static bool IsSwitchLocalOnFailEnabled(string baseDir)
+	{
+		try
+		{
+			var appSettingsFile = Path.Combine(baseDir, "appSettings.json");
+			if (File.Exists(appSettingsFile))
+			{
+				var raw = File.ReadAllText(appSettingsFile);
+				using var doc = JsonDocument.Parse(raw);
+				if (doc.RootElement.TryGetProperty("proxySettings", out var ps))
 				{
-					Proxy = new System.Net.WebProxy($"http://{info.Host}:{info.Port}")
+					if (ps.TryGetProperty("switchLocalOnFail", out var sl))
+						return sl.GetBoolean();
+				}
+			}
+		}
+		catch { }
+		return true;
+	}
+
+	public class ResilientProxyHttpHandler : HttpMessageHandler
+	{
+		private readonly SocketsHttpHandler _primaryHandler;
+		private readonly SocketsHttpHandler _directFallbackHandler;
+		private readonly string _proxyDesc;
+		private readonly bool _switchLocalOnFail;
+
+		public ResilientProxyHttpHandler(ParsedProxyInfo? proxyInfo, bool switchLocalOnFail)
+		{
+			_switchLocalOnFail = switchLocalOnFail;
+			if (proxyInfo != null && !string.IsNullOrEmpty(proxyInfo.Host) && proxyInfo.Port > 0)
+			{
+				_proxyDesc = $"{proxyInfo.Host}:{proxyInfo.Port}";
+				_primaryHandler = new SocketsHttpHandler
+				{
+					Proxy = new System.Net.WebProxy($"http://{proxyInfo.Host}:{proxyInfo.Port}")
 					{
-						Credentials = !string.IsNullOrEmpty(info.Username)
-							? new System.Net.NetworkCredential(info.Username, info.Password ?? "")
+						Credentials = !string.IsNullOrEmpty(proxyInfo.Username)
+							? new System.Net.NetworkCredential(proxyInfo.Username, proxyInfo.Password ?? "")
 							: null
 					},
 					UseProxy = true,
 					AutomaticDecompression = System.Net.DecompressionMethods.All,
-					PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-					ConnectTimeout = TimeSpan.FromSeconds(10)
+					PooledConnectionLifetime = TimeSpan.FromSeconds(60),
+					PooledConnectionIdleTimeout = TimeSpan.FromSeconds(20),
+					ConnectTimeout = TimeSpan.FromSeconds(8)
 				};
 			}
 			else
 			{
-				handler = new SocketsHttpHandler
+				_proxyDesc = "DynamicCreationWebProxy";
+				_primaryHandler = new SocketsHttpHandler
 				{
 					Proxy = DynamicCreationWebProxy.Instance,
 					UseProxy = true,
 					AutomaticDecompression = System.Net.DecompressionMethods.All,
-					PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-					ConnectTimeout = TimeSpan.FromSeconds(10)
+					PooledConnectionLifetime = TimeSpan.FromSeconds(60),
+					PooledConnectionIdleTimeout = TimeSpan.FromSeconds(20),
+					ConnectTimeout = TimeSpan.FromSeconds(8)
 				};
 			}
 
-			return new HttpClient(handler)
+			_directFallbackHandler = new SocketsHttpHandler
 			{
-				Timeout = TimeSpan.FromSeconds(15)
+				UseProxy = false,
+				AutomaticDecompression = System.Net.DecompressionMethods.All,
+				PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+				PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
+				ConnectTimeout = TimeSpan.FromSeconds(10)
 			};
-		});
+		}
+
+		protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+		{
+			byte[]? contentBytes = null;
+			if (request.Content != null)
+			{
+				contentBytes = await request.Content.ReadAsByteArrayAsync(cancellationToken);
+			}
+
+			// 1. Attempt primary request (via proxy)
+			try
+			{
+				var primaryReq = CloneRequest(request, contentBytes);
+				var invoker = new HttpMessageInvoker(_primaryHandler);
+				var resp = await invoker.SendAsync(primaryReq, cancellationToken);
+				if (resp.StatusCode == System.Net.HttpStatusCode.ProxyAuthenticationRequired)
+				{
+					throw new HttpRequestException($"Proxy returned 407 (ProxyAuthenticationRequired) for {_proxyDesc}");
+				}
+				return resp;
+			}
+			catch (Exception ex) when (_switchLocalOnFail && !cancellationToken.IsCancellationRequested)
+			{
+				Program.Trace($"[GATE] [PROXY-FALLBACK] Request {request.Method} {request.RequestUri} via {_proxyDesc} failed ({ex.GetType().Name}: {ex.Message}). Retrying via direct connection...");
+				try
+				{
+					var fallbackReq = CloneRequest(request, contentBytes);
+					var fallbackInvoker = new HttpMessageInvoker(_directFallbackHandler);
+					var fallbackResp = await fallbackInvoker.SendAsync(fallbackReq, cancellationToken);
+					Program.Trace($"[GATE] [PROXY-FALLBACK] Direct connection fallback succeeded for {request.RequestUri} with status {fallbackResp.StatusCode}!");
+					return fallbackResp;
+				}
+				catch (Exception fbEx)
+				{
+					Program.Trace($"[GATE] [PROXY-FALLBACK] Direct connection fallback also failed: {fbEx.Message}");
+					throw;
+				}
+			}
+		}
+
+		private static HttpRequestMessage CloneRequest(HttpRequestMessage req, byte[]? contentBytes)
+		{
+			var clone = new HttpRequestMessage(req.Method, req.RequestUri);
+			clone.Version = req.Version;
+			foreach (var header in req.Headers)
+			{
+				clone.Headers.TryAddWithoutValidation(header.Key, header.Value);
+			}
+			if (contentBytes != null && req.Content != null)
+			{
+				clone.Content = new ByteArrayContent(contentBytes);
+				foreach (var header in req.Content.Headers)
+				{
+					clone.Content.Headers.TryAddWithoutValidation(header.Key, header.Value);
+				}
+			}
+			return clone;
+		}
 	}
 
 	public static bool AreProxiesEnabled(string baseDir)
