@@ -763,24 +763,71 @@ public static class Program
 	private const string FallbackGuestAccessKey = "eyJha2lkIjoyMDIxMDQyMiwicmtpZCI6MjAyMTA0MjMsImciOjEwNTEwMjk5MDIsInYiOjN9.5ozW3_x4_vryAXrZXXtdOhma1yYa6G2bGnQsZrBtZC_TK6xpxeoVhYNWfESUnS4gsigPH0gAwXZW2rKojXtqWUPe8WaBjHyRx9hqBHHQ06ur-o9aZARheeeo-3NcJgp4hKHhosA4_uzb0FLqgAEgahVq0OrWk62001vcKL4dpBI.GZ5slgdeYpn4Du7YASjGN0Vrx_sUD9o6RAqmBVKhUHdKXHSIy0gkg-ZPT1q22JEiIiXydZ7FYzQhDZmebrxsksvgl5Vb5oLqC6dv9SX4CyCqEXQXmjkKAWdzQ7FYMiCwtoUPW69SkX8wAhuXCcHgaKw20mHK3Cy_zLJlZ4goQZk";
 
 	private static object? fixedGameVersion;
+	private static DateTime s_lastPeriodicVersionCheck = DateTime.MinValue;
 
 	public static string GetConfiguredGameVersion()
 	{
+		return GameVersionAutoUpdater.CurrentVersion ?? GameVersionAutoUpdater.ResolveVersion();
+	}
+
+	public static void ApplyGameVersion(string ver)
+	{
 		try
 		{
-			string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-			string gvPath = Path.Combine(baseDir, "game_version.txt");
-			if (File.Exists(gvPath))
+			Type? gameVersionType = Schema?.GameVersionType ?? typeof(AccountWindow).Assembly.GetType("LordsMobileBot.AppClasses.Settings.GameVersion");
+			if (gameVersionType != null)
 			{
-				string v = File.ReadAllText(gvPath).Trim();
-				if (!string.IsNullOrWhiteSpace(v) && v.Contains("."))
+				object newGvInst = Activator.CreateInstance(gameVersionType, ver)!;
+				fixedGameVersion = newGvInst;
+
+				gameVersionType.GetField("<currentGameVersion>k__BackingField", BindingFlags.Static | BindingFlags.NonPublic)?.SetValue(null, newGvInst);
+				gameVersionType.GetField("<currentGameVersionTW>k__BackingField", BindingFlags.Static | BindingFlags.NonPublic)?.SetValue(null, newGvInst);
+
+				gameVersionType.GetProperty("currentGameVersion", BindingFlags.Static | BindingFlags.Public)?.SetValue(null, newGvInst);
+				gameVersionType.GetProperty("currentGameVersionTW", BindingFlags.Static | BindingFlags.Public)?.SetValue(null, newGvInst);
+
+				GameVersionAutoUpdater.ParseVersionComponents(ver, out ushort maj, out ushort min, out ushort bld);
+				try
 				{
-					return v;
+					Assembly botAsm = typeof(AccountWindow).Assembly;
+					Type? clientType = botAsm.GetType("B6B92D16") ?? botAsm.GetTypes().FirstOrDefault(t => t.Name == "B6B92D16");
+					if (clientType != null)
+					{
+						FieldInfo? fld = clientType.GetField("DBB37824", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+						if (fld != null)
+						{
+							fld.SetValue(null, new ushort[] { maj, min, bld });
+							Trace($"[GATE] [AutoVersion] Injected ushort[] into {clientType.Name}.{fld.Name}: {maj}.{min}.{bld}");
+						}
+					}
 				}
+				catch { }
+
+				int gv1 = (int)(gameVersionType.GetField("GV1", BindingFlags.Instance | BindingFlags.Public)?.GetValue(newGvInst) ?? 0);
+				int gv2 = (int)(gameVersionType.GetField("GV2", BindingFlags.Instance | BindingFlags.Public)?.GetValue(newGvInst) ?? 0);
+				int gv3 = (int)(gameVersionType.GetField("GV3", BindingFlags.Instance | BindingFlags.Public)?.GetValue(newGvInst) ?? 0);
+				Trace($"[GATE] [AutoVersion] Enforced live GameVersion: {ver} (GV1={gv1}, GV2={gv2}, GV3={gv3})");
 			}
 		}
-		catch { }
-		return "2.208.320";
+		catch (Exception ex)
+		{
+			Trace($"[GATE] [AutoVersion] Note applying GameVersion: {ex.Message}");
+		}
+	}
+
+	public static string CheckAndUpdateLiveVersion(bool force = false)
+	{
+		string oldVer = GameVersionAutoUpdater.CurrentVersion;
+		string newVer = GameVersionAutoUpdater.ResolveVersion(force);
+		if (force || newVer != oldVer || fixedGameVersion == null)
+		{
+			ApplyGameVersion(newVer);
+			if (newVer != oldVer)
+			{
+				Trace($"[GATE] [AutoVersion] Live GameVersion updated dynamically: {oldVer} -> {newVer}");
+			}
+		}
+		return newVer;
 	}
 
 	private static AuthResponse? currentAuth;
@@ -1012,6 +1059,12 @@ public static class Program
 		Application.SetCompatibleTextRenderingDefault(defaultValue: false);
 		Control.CheckForIllegalCrossThreadCalls = false;
 		DisableDevExpressThreadingDetection();
+
+		GameVersionAutoUpdater.Initialize(Trace);
+		Trace("[GATE] [AutoVersion] Resolving latest live game version at entry point...");
+		string entryVer = GameVersionAutoUpdater.ResolveVersion(forceRefresh: true);
+		Trace($"[GATE] [AutoVersion] Session entry game version established: {entryVer}");
+
 		Trace("[GATE] Connecting to local auth server (server.py)...");
 		AuthResponse authResponse = null;
 		string text = string.Empty;
@@ -1223,20 +1276,8 @@ public static class Program
 		EnsureAccountKeys(AppDomain.CurrentDomain.BaseDirectory, typeof(AccountWindow).Assembly);
 		try
 		{
-			Type type = Schema.GameVersionType ?? typeof(AccountWindow).Assembly.GetType("LordsMobileBot.AppClasses.Settings.GameVersion");
-			if (type != null)
-			{
-				string text4 = GetConfiguredGameVersion();
-				object value = Activator.CreateInstance(type, text4);
-				object value2 = Activator.CreateInstance(type, text4);
-				PropertyInfo property = type.GetProperty("currentGameVersion", BindingFlags.Static | BindingFlags.Public);
-				PropertyInfo? property2 = type.GetProperty("currentGameVersionTW", BindingFlags.Static | BindingFlags.Public);
-				property?.SetValue(null, value);
-				property2?.SetValue(null, value2);
-				type.GetField("<currentGameVersion>k__BackingField", BindingFlags.Static | BindingFlags.NonPublic)?.SetValue(null, value);
-				type.GetField("<currentGameVersionTW>k__BackingField", BindingFlags.Static | BindingFlags.NonPublic)?.SetValue(null, value2);
-				Trace("[GATE] Enforced GameVersion: " + text4 + " (GV1=2, GV2=208, GV3=320)");
-			}
+			string text4 = GameVersionAutoUpdater.CurrentVersion ?? GetConfiguredGameVersion();
+			ApplyGameVersion(text4);
 		}
 		catch (Exception ex5)
 		{
@@ -1421,25 +1462,20 @@ public static class Program
 						}
 						try
 						{
-							Type type2 = Schema.GameVersionType ?? typeof(AccountWindow).Assembly.GetType("LordsMobileBot.AppClasses.Settings.GameVersion");
+							Type? type2 = Schema?.GameVersionType ?? typeof(AccountWindow).Assembly.GetType("LordsMobileBot.AppClasses.Settings.GameVersion");
 							if (type2 != null)
 							{
-								PropertyInfo property3 = type2.GetProperty("currentGameVersion", BindingFlags.Static | BindingFlags.Public);
-								object obj9 = property3?.GetValue(null);
-								int num = ((obj9 != null) ? ((int)(type2.GetField("GV1", BindingFlags.Instance | BindingFlags.Public)?.GetValue(obj9) ?? ((object)0))) : 0);
-								if (obj9 == null || num != 2)
+								object? obj9 = type2.GetProperty("currentGameVersion", BindingFlags.Static | BindingFlags.Public)?.GetValue(null);
+								int num = (obj9 != null) ? ((int)(type2.GetField("GV1", BindingFlags.Instance | BindingFlags.Public)?.GetValue(obj9) ?? 0)) : 0;
+								if (obj9 == null || num <= 0 || fixedGameVersion == null)
 								{
-									string text6 = GetConfiguredGameVersion();
-									object value3 = Activator.CreateInstance(type2, text6);
-									if (fixedGameVersion == null)
-									{
-										fixedGameVersion = value3;
-									}
-									property3?.SetValue(null, value3);
-									type2.GetProperty("currentGameVersionTW", BindingFlags.Static | BindingFlags.Public)?.SetValue(null, value3);
-									type2.GetField("<currentGameVersion>k__BackingField", BindingFlags.Static | BindingFlags.NonPublic)?.SetValue(null, value3);
-									type2.GetField("<currentGameVersionTW>k__BackingField", BindingFlags.Static | BindingFlags.NonPublic)?.SetValue(null, value3);
-									Trace($"[GATE] Re-enforced GameVersion: {text6} (was GV1={num})");
+									string text6 = GameVersionAutoUpdater.CurrentVersion ?? GetConfiguredGameVersion();
+									ApplyGameVersion(text6);
+								}
+								else if ((DateTime.UtcNow - s_lastPeriodicVersionCheck).TotalMinutes >= 15)
+								{
+									s_lastPeriodicVersionCheck = DateTime.UtcNow;
+									Task.Run(() => CheckAndUpdateLiveVersion(false));
 								}
 							}
 						}
@@ -4681,6 +4717,11 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 		if (!string.IsNullOrEmpty(item))
 		{
 			Trace($"[GATE MODAL STACKTRACE] (item='{item}'):\n{new System.Diagnostics.StackTrace(true)}");
+			if (item.Contains("outdated", StringComparison.OrdinalIgnoreCase) || item.Contains("version", StringComparison.OrdinalIgnoreCase))
+			{
+				Trace("[GATE] [AutoVersion] Detected outdated game version notification in modal! Triggering live auto-update...");
+				Task.Run(() => CheckAndUpdateLiveVersion(true));
+			}
 		}
 	}
 
@@ -4689,6 +4730,11 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 		if (!string.IsNullOrEmpty(res) && res.Contains("License", StringComparison.OrdinalIgnoreCase))
 		{
 			Trace($"[GATE LICENSE STACKTRACE (Sharer)]:\n{new System.Diagnostics.StackTrace(true)}");
+		}
+		if (!string.IsNullOrEmpty(res) && (res.Contains("outdated", StringComparison.OrdinalIgnoreCase) || res.Contains("version", StringComparison.OrdinalIgnoreCase)))
+		{
+			Trace("[GATE] [AutoVersion] Detected outdated game version notification in modal (Sharer)! Triggering live auto-update...");
+			Task.Run(() => CheckAndUpdateLiveVersion(true));
 		}
 		if (res != null && (res.Contains("re-assign proxies", StringComparison.OrdinalIgnoreCase) ||
 		                    res.Contains("Do you want to continue", StringComparison.OrdinalIgnoreCase) ||
@@ -5434,13 +5480,8 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 			Type gameVersionType = Schema.GameVersionType;
 			if (gameVersionType != null)
 			{
-				string gvStr = GetConfiguredGameVersion();
-				if (fixedGameVersion == null)
-				{
-					fixedGameVersion = Activator.CreateInstance(gameVersionType, gvStr);
-				}
-				gameVersionType.GetField("<currentGameVersion>k__BackingField", BindingFlags.Static | BindingFlags.NonPublic)?.SetValue(null, fixedGameVersion);
-				gameVersionType.GetField("<currentGameVersionTW>k__BackingField", BindingFlags.Static | BindingFlags.NonPublic)?.SetValue(null, fixedGameVersion);
+				string gvStr = GameVersionAutoUpdater.CurrentVersion ?? GetConfiguredGameVersion();
+				ApplyGameVersion(gvStr);
 				MethodInfo method = gameVersionType.GetMethod("getGameVersion", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 				if (method != null)
 				{

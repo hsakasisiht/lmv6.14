@@ -281,6 +281,32 @@ internal static class WebControlServer
 				WriteJson(response, 200, JsonConvert.SerializeObject(statusData));
 				return;
 			}
+			case "/api/settings/gameversion":
+			{
+				string curVer = GameVersionAutoUpdater.CurrentVersion ?? Program.GetConfiguredGameVersion();
+				WriteJson(response, 200, JsonConvert.SerializeObject(new
+				{
+					success = true,
+					version = curVer,
+					major = GameVersionAutoUpdater.Major,
+					minor = GameVersionAutoUpdater.Minor,
+					build = GameVersionAutoUpdater.Build
+				}));
+				return;
+			}
+			case "/api/settings/gameversion/update":
+			{
+				string updatedVer = Program.CheckAndUpdateLiveVersion(force: true);
+				WriteJson(response, 200, JsonConvert.SerializeObject(new
+				{
+					success = true,
+					version = updatedVer,
+					major = GameVersionAutoUpdater.Major,
+					minor = GameVersionAutoUpdater.Minor,
+					build = GameVersionAutoUpdater.Build
+				}));
+				return;
+			}
 			}
 			if (text.StartsWith("/api/accounts/", StringComparison.OrdinalIgnoreCase))
 			{
