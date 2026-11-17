@@ -4856,7 +4856,7 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 
 	public static void BypassAssignLogicalUserWatcher(string item, string cfg, bool containscontrol, bool doattr2, MessageBoxButtons setup3, MessageBoxIcon pol4, Control counter5)
 	{
-		Trace($"[GATE] Intercepted AssignLogicalUserWatcher modal: item='{item}', caption='{cfg}', buttons={setup3}, icon={pol4} -> suppressed to avoid thread pause");
+		Trace($"[GATE] Intercepted AssignLogicalUserWatcher modal: item='{item}', caption='{cfg}', buttons={setup3}, icon={pol4}");
 		if (!string.IsNullOrEmpty(item))
 		{
 			Trace($"[GATE MODAL STACKTRACE] (item='{item}'):\n{new System.Diagnostics.StackTrace(true)}");
@@ -4864,8 +4864,23 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 			{
 				Trace("[GATE] [AutoVersion] Detected outdated game version notification in modal! Triggering live auto-update...");
 				Task.Run(() => CheckAndUpdateLiveVersion(true));
+				return;
+			}
+
+			// Surface user-facing action notices so user gets clear feedback on their operations
+			if (item.Contains("applied", StringComparison.OrdinalIgnoreCase) ||
+			    item.Contains("saved", StringComparison.OrdinalIgnoreCase) ||
+			    item.Contains("selected account", StringComparison.OrdinalIgnoreCase) ||
+			    item.Contains("Select Account", StringComparison.OrdinalIgnoreCase) ||
+			    item.Contains("No settings", StringComparison.OrdinalIgnoreCase) ||
+			    item.Contains("assigned to accounts successfully", StringComparison.OrdinalIgnoreCase))
+			{
+				Trace($"[GATE] Showing user-facing notification modal: item='{item}', caption='{cfg}'");
+				MessageBox.Show(item, string.IsNullOrEmpty(cfg) ? "Notice" : cfg, MessageBoxButtons.OK, pol4 == MessageBoxIcon.None ? MessageBoxIcon.Information : pol4);
+				return;
 			}
 		}
+		Trace($"[GATE] Suppressed background modal item='{item}' to avoid thread pause.");
 	}
 
 	public static DialogResult BypassAssignLiteralWatcherSharer(string res, string cfg, MessageBoxIcon filter, bool isasset2)
@@ -4889,6 +4904,16 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 			{
 				CleanupDeletedAccountFolders();
 			}
+			return dr;
+		}
+		if ((res != null && (res.Contains("overwrite", StringComparison.OrdinalIgnoreCase) ||
+		                     res.Contains("Are You Sure", StringComparison.OrdinalIgnoreCase))) ||
+		    (cfg != null && (cfg.Contains("overwrite", StringComparison.OrdinalIgnoreCase) ||
+		                     cfg.Contains("Are You Sure", StringComparison.OrdinalIgnoreCase))))
+		{
+			Trace($"[GATE] Intercepted AssignLiteralWatcherSharer modal for overwrite confirmation: res='{res}', caption='{cfg}', icon={filter}");
+			DialogResult dr = MessageBox.Show(res, cfg, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+			Trace($"[GATE] Overwrite confirmation result: {dr}");
 			return dr;
 		}
 		if (res != null && (res.Contains("re-assign proxies", StringComparison.OrdinalIgnoreCase) ||
@@ -4917,6 +4942,16 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 			{
 				CleanupDeletedAccountFolders();
 			}
+			return dr;
+		}
+		if ((setup != null && (setup.Contains("overwrite", StringComparison.OrdinalIgnoreCase) ||
+		                       setup.Contains("Are You Sure", StringComparison.OrdinalIgnoreCase))) ||
+		    (reg != null && (reg.Contains("overwrite", StringComparison.OrdinalIgnoreCase) ||
+		                     reg.Contains("Are You Sure", StringComparison.OrdinalIgnoreCase))))
+		{
+			Trace($"[GATE] Intercepted StartSharer modal for overwrite confirmation: setup='{setup}', caption='{reg}', icon={consumer}");
+			DialogResult dr = MessageBox.Show(setup, reg, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+			Trace($"[GATE] Overwrite confirmation result: {dr}");
 			return dr;
 		}
 		if (setup != null && (setup.Contains("re-assign proxies", StringComparison.OrdinalIgnoreCase) ||
@@ -5143,11 +5178,128 @@ public static (bool Stop, proxyRecord? Proxy) HookedBulkGetProxy(object form, bo
 				};
 			}
 
+			if (accountWindow.globalSettingsBtn != null)
+			{
+				PrependBarItemClickHandler(accountWindow.globalSettingsBtn, (s, e) =>
+				{
+					Trace("[GATE] [GlobalSettings] globalSettingsBtn clicked");
+					EnsureAccountsSelectedForGlobalSettings(accountWindow);
+				});
+			}
+
+			if (accountWindow.quickSettingsBtn != null)
+			{
+				PrependBarItemClickHandler(accountWindow.quickSettingsBtn, (s, e) =>
+				{
+					Trace("[GATE] [GlobalSettings] quickSettingsBtn clicked");
+					EnsureAccountsSelectedForGlobalSettings(accountWindow);
+				});
+			}
+
 			Trace("[GATE] AccountWindow context menu & row selection handlers successfully installed.");
 		}
 		catch (Exception ex)
 		{
 			Trace($"[GATE] Note configuring context menu handlers: {ex.Message}");
+		}
+	}
+
+	private static void PrependBarItemClickHandler(BarItem item, ItemClickEventHandler handler)
+	{
+		try
+		{
+			PropertyInfo? eventsProp = typeof(System.ComponentModel.Component).GetProperty("Events", BindingFlags.Instance | BindingFlags.NonPublic);
+			System.ComponentModel.EventHandlerList? list = eventsProp?.GetValue(item) as System.ComponentModel.EventHandlerList;
+			if (list == null)
+			{
+				item.ItemClick += handler;
+				return;
+			}
+
+			FieldInfo[] fields = typeof(BarItem).GetFields(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+			object? clickKey = null;
+			foreach (var f in fields)
+			{
+				if (f.Name.IndexOf("click", StringComparison.OrdinalIgnoreCase) >= 0)
+				{
+					object? val = f.GetValue(null);
+					if (val != null)
+					{
+						clickKey = val;
+						break;
+					}
+				}
+			}
+
+			if (clickKey != null)
+			{
+				Delegate? existing = list[clickKey];
+				if (existing != null)
+				{
+					list[clickKey] = Delegate.Combine(handler, existing);
+					Trace($"[GATE] Prepended handler to BarItem '{item.Name}' Click event successfully.");
+					return;
+				}
+			}
+
+			item.ItemClick += handler;
+		}
+		catch (Exception ex)
+		{
+			Trace($"[GATE] Note in PrependBarItemClickHandler for '{item.Name}': {ex.Message}");
+			item.ItemClick += handler;
+		}
+	}
+
+	private static void EnsureAccountsSelectedForGlobalSettings(AccountWindow aw)
+	{
+		try
+		{
+			GridView? view = aw?.accountView;
+			if (view == null) return;
+
+			bool anySelected = false;
+			PropertyInfo? isSelProp = null;
+			for (int i = 0; i < view.RowCount; i++)
+			{
+				int rh = view.GetRowHandle(i);
+				if (!view.IsGroupRow(rh))
+				{
+					object? item = view.GetRow(rh);
+					if (item != null)
+					{
+						if (isSelProp == null) isSelProp = item.GetType().GetProperty("IsSelected");
+						if ((bool)(isSelProp?.GetValue(item) ?? false))
+						{
+							anySelected = true;
+							break;
+						}
+					}
+				}
+			}
+
+			if (!anySelected)
+			{
+				for (int i = 0; i < view.RowCount; i++)
+				{
+					int rh = view.GetRowHandle(i);
+					if (!view.IsGroupRow(rh))
+					{
+						object? item = view.GetRow(rh);
+						if (item != null)
+						{
+							if (isSelProp == null) isSelProp = item.GetType().GetProperty("IsSelected");
+							isSelProp?.SetValue(item, true);
+							view.RefreshRow(rh);
+						}
+					}
+				}
+				Trace("[GATE] [GlobalSettings] Auto-checked ALL accounts because none were selected when Global Settings was opened.");
+			}
+		}
+		catch (Exception ex)
+		{
+			Trace($"[GATE] Note in EnsureAccountsSelectedForGlobalSettings: {ex.Message}");
 		}
 	}
 
